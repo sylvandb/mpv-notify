@@ -1,6 +1,7 @@
 -- notify.lua -- Desktop notifications for mpv.
 -- Just put this file into your ~/.mpv/lua folder and mpv will find it.
 --
+-- Copyright (c) 2021 Sylvan Butler
 -- Copyright (c) 2014 Roland Hieber
 --
 -- Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -21,14 +22,31 @@
 -- OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 -- SOFTWARE.
 
+
+
 -------------------------------------------------------------------------------
 -- helper functions
 -------------------------------------------------------------------------------
+
 
 function print_debug(s)
 	--print("DEBUG: " .. s) -- comment/not to hide/show debug output
 	return true
 end
+
+
+local err = ""
+-- TODO: dirty hack, may only work on Linux.
+function is_readable(fn)
+	local f = nil
+	f, err = io.open(fn, "r")
+	if f then
+		f:close()
+		return true
+	end
+	return false
+end
+
 
 -- url-escape a string, per RFC 2396, Section 2
 function string.urlescape(str)
@@ -39,9 +57,10 @@ function string.urlescape(str)
 	return s;
 end
 
+
 -- escape string for html
 function string.htmlescape(str)
-	local str = string.gsub(str, "<", "&lt;")
+	str = string.gsub(str, "<", "&lt;")
 	str = string.gsub(str, ">", "&gt;")
 	str = string.gsub(str, "&", "&amp;")
 	str = string.gsub(str, "\"", "&quot;")
@@ -49,10 +68,15 @@ function string.htmlescape(str)
 	return str
 end
 
+
 -- escape string for shell inclusion
 function string.shellescape(str)
+	str = string.gsub(str, "[\r\n]", " ")
+	str = string.gsub(str, " +$", "")
+	str = string.gsub(str, "^ +", "")
 	return "'"..string.gsub(str, "'", "'\"'\"'").."'"
 end
+
 
 -- converts string to a valid filename on most (modern) filesystems
 function string.safe_filename(str)
@@ -63,21 +87,35 @@ function string.safe_filename(str)
 	return s;
 end
 
+
+
 -------------------------------------------------------------------------------
 -- here we go.
 -------------------------------------------------------------------------------
 
-local http = require("socket.http")
-http.TIMEOUT = 3
-http.USERAGENT = "mpv-notify/0.1"
+
+local DOWNLOAD_COVER_ART = true
+
+
+local http = nil
+if DOWNLOAD_COVER_ART then
+	http = require("socket.http")
+	http.TIMEOUT = 3
+	http.USERAGENT = "mpv-notify/0.2 (github.com/sylvandb/mpv-notify)"
+end
 
 local posix = require("posix")
+
 
 local CACHE_DIR = os.getenv("XDG_CACHE_HOME")
 CACHE_DIR = CACHE_DIR or os.getenv("HOME").."/.cache"
 CACHE_DIR = CACHE_DIR.."/mpv/coverart"
 print_debug("making " .. CACHE_DIR)
-os.execute("mkdir -p -- " .. string.shellescape(CACHE_DIR))
+local SUBDIRS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+SUBDIRS:gsub(".", function(c)
+	os.execute("mkdir -p -- " .. string.shellescape(CACHE_DIR) .. "/" .. c)
+end)
+
 
 -- size can be 250, 500 or 1200
 -- https://wiki.musicbrainz.org/Cover_Art_Archive/API#Cover_Art_Archive_Metadata
@@ -87,11 +125,15 @@ local COVER_ART_SCALE = "1200"
 -- format in the MBID
 local COVER_ART_API = "http://coverartarchive.org/release/%s/front-" .. COVER_ART_SIZE
 local MBID_API = "http://musicbrainz.org/ws/2/release?limit=1&query="
+local NO_FETCH_PREFIX = "404_no-"
+local AUTO_NO_FETCH = true
+
 
 function tmpname()
 	local _, fname = posix.mkstemp(CACHE_DIR .. "/rescale.XXXXXX")
 	return fname
 end
+
 
 -- scale an image file
 -- @return boolean of success
@@ -102,17 +144,134 @@ function scale_image(src, dst)
 	return not not os.execute(convert_cmd)
 end
 
+
+function no_fetch_flag(artist, album)
+	if NO_FETCH_PREFIX then
+		-- TODO: check flag being too old???
+		local flagname = cache_compute_filename(artist, album, NO_FETCH_PREFIX)
+		if is_readable(flagname) then
+			return true
+		end
+	end
+	return false
+end
+
+
+function no_fetch_flag_set(artist, album, mbid)
+	if AUTO_NO_FETCH and NO_FETCH_PREFIX then
+		local flagname = cache_compute_filename(artist, album, NO_FETCH_PREFIX)
+		local f = io.open(flagname, "w+")
+		if mbid then
+			f:write(("mbid=%s\n"):format(mbid))
+		end
+		f:close()
+	end
+end
+
+
+function cache_compute_filename(artist, album, prefix)
+	local filename = artist .. "_" .. album
+	local dirname = string.safe_filename(filename:gsub(" ", ""):gsub("^THE", ""):sub(1, 1):upper())
+	return CACHE_DIR .. "/" .. dirname .. "/" .. (prefix or "") .. string.safe_filename(filename) .. ".png"
+end
+
+
+-- store cover art into cache
+-- @return file name of cover art, or nil in case of error
+function cache_set_cover_art(artist, album, artdata, artfile)
+	local file_is_tmp = false
+	local tmp_filename
+	if artdata then
+		file_is_tmp = true
+		tmp_filename = tmpname()
+		local f = io.open(tmp_filename, "w+")
+		f:write(artdata)
+		f:flush()
+		f:close()
+	else
+		tmp_filename = artfile
+	end
+
+	if not artist or artist == "" or not album or album == "" then
+		-- cannot cache
+		return tmp_filename
+	end
+
+	local cache_filename = cache_compute_filename(artist, album)
+
+	-- make it a nice size
+	if COVER_ART_SIZE ~= COVER_ART_SCALE or not file_is_tmp then
+		if scale_image(tmp_filename, cache_filename) then
+			if file_is_tmp then
+				if not os.remove(tmp_filename) then
+					print("could not remove" .. tmp_filename .. ", please remove it manually")
+				end
+			end
+			return cache_filename
+		end
+		print(("could not scale %s to %s"):format(tmp_filename, cache_filename))
+	end
+
+	if file_is_tmp then
+		if os.rename(tmp_filename, cache_filename) then
+			return cache_filename
+		end
+		print(("could not rename %s to %s"):format(tmp_filename, cache_filename))
+	end
+	return tmp_filename
+end
+
+
+-- get cover art from cache
+-- @return file name of cover art, or nil in case of error
+function cache_get_cover_art(artist, album)
+	print_debug("cache_get_cover_art parameters:")
+	print_debug("artist: " .. artist)
+	print_debug("album: " .. album)
+
+	if not artist or artist == "" or not album or album == "" then
+		print("cache requires artist and album for cover art.")
+		return nil
+	end
+
+	local cache_filename = cache_compute_filename(artist, album)
+	if is_readable(cache_filename) then
+		print_debug("cache found cover art: " .. cache_filename)
+		return cache_filename  -- exists and is readable
+	elseif string.find(err, "[Pp]ermission denied") then
+		print(("cannot read from cached file %s: %s"):format(cache_filename, err))
+		return nil
+	end
+	-- no cached art
+	return nil
+end
+
+
+function folder_get_cover_art(artist, album)
+	-- first try finding local cover art
+	local pathname = mp.get_property_native("path")
+	-- pathname = os.getenv("PWD") .. "/" .. pathname
+	print_debug("path: " .. pathname)
+	pathname = find_folder_cover_art(pathname)
+	if pathname and pathname ~= "" then
+		print_debug("folder found cover art: " .. pathname)
+		return cache_set_cover_art(artist, album, nil, pathname)
+	end
+	return nil
+end
+
+
 -- look for a list of possible cover art images in the same folder as the file
 -- @param absolute filename name of currently played file, or nil if no match
-function get_folder_cover_art(filename)
+function find_folder_cover_art(filename)
 	if not filename or string.len(filename) < 1 then
 		return nil
 	end
 
-	print_debug("get_folder_cover_art: filename is " .. filename)
+	print_debug("find_folder_cover_art: filename is " .. filename)
 
 	local cover_extensions = { "png", "jpg", "jpeg", "gif" }
-	local cover_names = { "cover", "folder", "front", "back", "insert" }
+	local cover_names = { "cover", "front", "AlbumArtwork", "folder", "back", "insert" }
 
 	local path = string.match(filename, "^(.*/)[^/]+$")
 
@@ -124,11 +283,9 @@ function get_folder_cover_art(filename)
 			for _,name in pairs(morenames) do
 				for _,ext in pairs(moreexts) do
 					local fn = path .. name .. "." .. ext
-					--print_debug("get_folder_cover_art: trying " .. fn)
-					local f = io.open(fn, "r")
-					if f then
-						f:close()
-						print_debug("get_folder_cover_art: match at " .. fn)
+					--print_debug("find_folder_cover_art: trying " .. fn)
+					if is_readable(fn) then
+						print_debug("find_folder_cover_art: match at " .. fn)
 						return fn
 					end
 				end
@@ -138,33 +295,24 @@ function get_folder_cover_art(filename)
 	return nil
 end
 
+
 -- fetch cover art from MusicBrainz/Cover Art Archive
 -- @return file name of downloaded cover art, or nil in case of error
 -- @param mbid optional MusicBrainz release ID
 function fetch_musicbrainz_cover_art(artist, album, mbid)
+	if not DOWNLOAD_COVER_ART then
+		return nil
+	end
+	if no_fetch_flag(artist, album) then
+		print("not fetching album art")
+		return nil
+	end
 	print_debug("fetch_musicbrainz_cover_art parameters:")
 	print_debug("artist: " .. artist)
 	print_debug("album: " .. album)
 	print_debug("mbid: " .. mbid)
 
-	if not artist or artist == "" or not album or album == "" then
-		print("not enough metadata, not fetching cover art.")
-		return nil
-	end
-
-	local output_filename = string.safe_filename(artist .. "_" .. album)
-	output_filename = CACHE_DIR .. "/" .. output_filename .. ".png"
-
-	-- TODO: dirty hack, may only work on Linux.
-	f, err = io.open(output_filename, "r")
-	if f then
-		print_debug("file is already in cache: " .. output_filename)
-		return output_filename  -- exists and is readable
-	elseif string.find(err, "[Pp]ermission denied") then
-		print(("cannot read from cached file %s: %s"):format(output_filename, err))
-		return nil
-	end
-	print_debug("fetching album art to: " .. output_filename)
+	print_debug("fetching album art")
 
 	local valid_mbid = function(s)
 		return s and string.len(s) > 0 and not string.find(s, "[^0-9a-fA-F-]")
@@ -174,12 +322,13 @@ function fetch_musicbrainz_cover_art(artist, album, mbid)
 	if not valid_mbid(mbid) then
 		local query = ('artist:"%s" AND release:"%s"'):format(artist:gsub('"', ""), album:gsub('"', ""))
 		local url = MBID_API .. string.urlescape(query)
-		print_debug("fetching " .. url)
+		print("lookup album MBID with: " .. url)
 		local d, c, h = http.request(url)
 		-- poor man's XML parsing:
 		mbid = string.match(d or "",
 			"<%s*release%s+[^>]*id%s*=%s*['\"]%s*([0-9a-fA-F-]+)%s*['\"]")
 		if not mbid or not valid_mbid(mbid) then
+			no_fetch_flag_set(artist, album)
 			print("MusicBrainz returned no match.")
 			print_debug("content: " .. d)
 			return nil
@@ -192,38 +341,40 @@ function fetch_musicbrainz_cover_art(artist, album, mbid)
 	print("fetching album cover from: " .. url)
 	local d, c, h = http.request(url)
 	if c ~= 200 then
+		no_fetch_flag_set(artist, album, mbid)
 		print(("Cover Art Archive returned HTTP %s for MBID: %s"):format(c, mbid))
 		return nil
 	end
 	if not d or string.len(d) < 1 then
+		no_fetch_flag_set(artist, album, mbid)
 		print(("Cover Art Archive returned no content for MBID: %s"):format(mbid))
 		print_debug("HTTP response: " .. d)
 		return nil
 	end
 
-	local tmp_filename = tmpname()
-	local f = io.open(tmp_filename, "w+")
-	f:write(d)
-	f:flush()
-	f:close()
-
-	-- make it a nice size
-	if COVER_ART_SIZE ~= COVER_ART_SCALE then
-		if scale_image(tmp_filename, output_filename) then
-			if not os.remove(tmp_filename) then
-				print("could not remove" .. tmp_filename .. ", please remove it manually")
-			end
-			return output_filename
-		end
-		print(("could not scale %s to %s"):format(tmp_filename, output_filename))
-	end
-
-	if os.rename(tmp_filename, output_filename) then
-		return output_filename
-	end
-	print(("could not rename %s to %s"):format(tmp_filename, output_filename))
-	return tmp_filename
+	print_debug(("fetch found cover art %d bytes for MBID: %s"):format(string.len(d), mbid))
+	return cache_set_cover_art(artist, album, d, nil)
 end
+
+
+function get_cover_art(artist, album, album_mbid)
+	-- best place for art is the cache
+	local art_file = cache_get_cover_art(artist, album)
+
+	-- or perhaps in the original folder
+	if not art_file then
+		art_file = folder_get_cover_art(artist, album)
+	end
+
+	-- finally check the cover art archive online
+	if not art_file
+	   and ((artist ~= "" and album ~= "") or album_mbid ~= "") then
+		art_file = fetch_musicbrainz_cover_art(artist, album, album_mbid)
+	end
+
+	return art_file
+end
+
 
 function notify_current_track()
 	local data = mp.get_property_native("metadata")
@@ -251,33 +402,17 @@ function notify_current_track()
 	print_debug("album: " .. album)
 	print_debug("album_mbid: " .. album_mbid)
 
-	-- TODO: always check cache first, always cache, notify from cache
 	local summary = ""
 	local body = ""
 	local params = ""
-	local scaled_image = ""
-	local delete_scaled_image = false
-
-	-- first try finding local cover art
-	local abs_filename = os.getenv("PWD") .. "/" .. mp.get_property_native("path")
-	print_debug("path: " .. abs_filename)
-	local cover_image = get_folder_cover_art(abs_filename)
-	if cover_image and cover_image ~= "" then
-		scaled_image = tmpname()
-		scale_image(cover_image, scaled_image)
-		delete_scaled_image = true
-	end
-
-	-- then load cover art from the internet
-	if (not scaled_image or scaled_image == "")
-	   and ((artist ~= "" and album ~= "") or album_mbid ~= "") then
-		scaled_image = fetch_musicbrainz_cover_art(artist, album, album_mbid)
-		cover_image = scaled_image
-	end
+	local scaled_image = get_cover_art(artist, album, album_mbid)
 
 	if scaled_image and string.len(scaled_image) > 1  then
-		print("found cover art in " .. cover_image)
+		print_debug("found cover art in: " .. scaled_image)
 		params = " -i " .. string.shellescape(scaled_image)
+	else
+		print("no cover art")
+		params = " -i mpv"
 	end
 
 	if(artist == "") then
@@ -291,26 +426,32 @@ function notify_current_track()
 		if album == "" then
 			body = string.shellescape(string.htmlescape(title))
 		else
-			body = string.shellescape(("%s -- <i>%s</i>"):format(
+			-- <br /> doesn't break (literal) nor does \n even embedded literal, but \r does
+			body = string.shellescape(("%s\\r<i>%s</i>"):format(
 				string.htmlescape(title), string.htmlescape(album)))
 		end
 	end
 
 	local command = ("notify-send -a mpv %s -- %s %s"):format(params, summary, body)
-	print_debug("command: " .. command)
+	print("sending command: " .. command)
 	os.execute(command)
-
-	if delete_scaled_image and not os.remove(scaled_image) then
-		print("could not remove" .. scaled_image .. ", please remove it manually")
-	end
-end
-
-function notify_metadata_updated(name, data)
-	notify_current_track()
 end
 
 
--- insert main() here
 
+-- notify when media file is loaded
 mp.register_event("file-loaded", notify_current_track)
---mp.observe_property("metadata", nil, notify_metadata_updated)
+
+-- notify when metadata is loaded - will double notify every new file
+--mp.observe_property("metadata", nil, function(name, value) notify_current_track(); end)
+
+-- notify when paused/unpaused - will double notify every new file
+--mp.observe_property("pause", nil, function(name, value) notify_current_track(); end)
+
+-- notify when unpaused
+mp.observe_property("pause", "bool", function(name, value)
+	--print(("%s: %s"):format(name, value))
+	if not value then
+		notify_current_track()
+	end
+end)
