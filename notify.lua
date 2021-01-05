@@ -26,7 +26,7 @@
 -------------------------------------------------------------------------------
 
 function print_debug(s)
-	-- print("DEBUG: " .. s) -- comment out for no debug info
+	--print("DEBUG: " .. s) -- comment/not to hide/show debug output
 	return true
 end
 
@@ -79,6 +79,15 @@ CACHE_DIR = CACHE_DIR.."/mpv/coverart"
 print_debug("making " .. CACHE_DIR)
 os.execute("mkdir -p -- " .. string.shellescape(CACHE_DIR))
 
+-- size can be 250, 500 or 1200
+-- https://wiki.musicbrainz.org/Cover_Art_Archive/API#Cover_Art_Archive_Metadata
+local COVER_ART_SIZE = "1200"
+-- scale can be the same or a different size
+local COVER_ART_SCALE = "1200"
+-- format in the MBID
+local COVER_ART_API = "http://coverartarchive.org/release/%s/front-" .. COVER_ART_SIZE
+local MBID_API = "http://musicbrainz.org/ws/2/release?limit=1&query="
+
 function tmpname()
 	local _, fname = posix.mkstemp(CACHE_DIR .. "/rescale.XXXXXX")
 	return fname
@@ -87,13 +96,10 @@ end
 -- scale an image file
 -- @return boolean of success
 function scale_image(src, dst)
-	local convert_cmd = ("convert -scale x64 -- %s %s"):format(
-		string.shellescape(src), string.shellescape(dst))
+	local convert_cmd = ("convert -scale x%s -- %s %s"):format(
+		COVER_ART_SCALE, string.shellescape(src), string.shellescape(dst))
 	print_debug("executing " .. convert_cmd)
-	if os.execute(convert_cmd) then
-		return true
-	end
-	return false
+	return not not os.execute(convert_cmd)
 end
 
 -- look for a list of possible cover art images in the same folder as the file
@@ -147,7 +153,7 @@ function fetch_musicbrainz_cover_art(artist, album, mbid)
 	end
 
 	local output_filename = string.safe_filename(artist .. "_" .. album)
-	output_filename = (CACHE_DIR .. "/%s.png"):format(output_filename)
+	output_filename = CACHE_DIR .. "/" .. output_filename .. ".png"
 
 	-- TODO: dirty hack, may only work on Linux.
 	f, err = io.open(output_filename, "r")
@@ -158,18 +164,17 @@ function fetch_musicbrainz_cover_art(artist, album, mbid)
 		print(("cannot read from cached file %s: %s"):format(output_filename, err))
 		return nil
 	end
-	print_debug("fetching album art to " .. output_filename)
+	print_debug("fetching album art to: " .. output_filename)
 
 	local valid_mbid = function(s)
 		return s and string.len(s) > 0 and not string.find(s, "[^0-9a-fA-F-]")
 	end
 
-	-- fetch release MBID from MusicBrainz, needed for Cover Art Archive
+	-- lookup MBID from MusicBrainz, needed for Cover Art Archive
 	if not valid_mbid(mbid) then
 		string.gsub(artist, '"', "")
 		local query = ("%s AND artist:%s"):format(album, artist)
-		local url = "http://musicbrainz.org/ws/2/release?limit=1&query="
-			.. string.urlescape(query)
+		local url = MBID_API .. string.urlescape(query)
 		print_debug("fetching " .. url)
 		local d, c, h = http.request(url)
 		-- poor man's XML parsing:
@@ -181,18 +186,18 @@ function fetch_musicbrainz_cover_art(artist, album, mbid)
 			return nil
 		end
 	end
-	print_debug("got MusicBrainz ID " .. mbid)
+	print_debug("got MusicBrainz ID: " .. mbid)
 
 	-- fetch image from Cover Art Archive
-	local url = ("http://coverartarchive.org/release/%s/front-250"):format(mbid)
-	print("fetching album cover from " .. url)
+	local url = (COVER_ART_API):format(mbid)
+	print("fetching album cover from: " .. url)
 	local d, c, h = http.request(url)
 	if c ~= 200 then
-		print(("Cover Art Archive returned HTTP %s for MBID %s"):format(c, mbid))
+		print(("Cover Art Archive returned HTTP %s for MBID: %s"):format(c, mbid))
 		return nil
 	end
 	if not d or string.len(d) < 1 then
-		print(("Cover Art Archive returned no content for MBID %s"):format(mbid))
+		print(("Cover Art Archive returned no content for MBID: %s"):format(mbid))
 		print_debug("HTTP response: " .. d)
 		return nil
 	end
@@ -204,15 +209,21 @@ function fetch_musicbrainz_cover_art(artist, album, mbid)
 	f:close()
 
 	-- make it a nice size
-	if scale_image(tmp_filename, output_filename) then
-		if not os.remove(tmp_filename) then
-			print("could not remove" .. tmp_filename .. ", please remove it manually")
+	if COVER_ART_SIZE ~= COVER_ART_SCALE then
+		if scale_image(tmp_filename, output_filename) then
+			if not os.remove(tmp_filename) then
+				print("could not remove" .. tmp_filename .. ", please remove it manually")
+			end
+			return output_filename
 		end
-		return output_filename
+		print(("could not scale %s to %s"):format(tmp_filename, output_filename))
 	end
 
-	print(("could not scale %s to %s"):format(tmp_filename, output_filename))
-	return nil
+	if os.rename(tmp_filename, output_filename) then
+		return output_filename
+	end
+	print(("could not rename %s to %s"):format(tmp_filename, output_filename))
+	return tmp_filename
 end
 
 function notify_current_track()
@@ -241,6 +252,7 @@ function notify_current_track()
 	print_debug("album: " .. album)
 	print_debug("album_mbid: " .. album_mbid)
 
+	-- TODO: always check cache first, always cache, notify from cache
 	local summary = ""
 	local body = ""
 	local params = ""
@@ -249,6 +261,7 @@ function notify_current_track()
 
 	-- first try finding local cover art
 	local abs_filename = os.getenv("PWD") .. "/" .. mp.get_property_native("path")
+	print_debug("path: " .. abs_filename)
 	local cover_image = get_folder_cover_art(abs_filename)
 	if cover_image and cover_image ~= "" then
 		scaled_image = tmpname()
@@ -279,7 +292,7 @@ function notify_current_track()
 		if album == "" then
 			body = string.shellescape(string.htmlescape(title))
 		else
-			body = string.shellescape(("%s<br /><i>%s</i>"):format(
+			body = string.shellescape(("%s -- <i>%s</i>"):format(
 				string.htmlescape(title), string.htmlescape(album)))
 		end
 	end
@@ -301,4 +314,4 @@ end
 -- insert main() here
 
 mp.register_event("file-loaded", notify_current_track)
-mp.observe_property("metadata", nil, notify_metadata_updated)
+--mp.observe_property("metadata", nil, notify_metadata_updated)
