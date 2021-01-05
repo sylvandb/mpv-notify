@@ -172,13 +172,12 @@ function fetch_musicbrainz_cover_art(artist, album, mbid)
 
 	-- lookup MBID from MusicBrainz, needed for Cover Art Archive
 	if not valid_mbid(mbid) then
-		string.gsub(artist, '"', "")
-		local query = ("%s AND artist:%s"):format(album, artist)
+		local query = ('artist:"%s" AND release:"%s"'):format(artist:gsub('"', ""), album:gsub('"', ""))
 		local url = MBID_API .. string.urlescape(query)
 		print_debug("fetching " .. url)
 		local d, c, h = http.request(url)
 		-- poor man's XML parsing:
-		local mbid = string.match(d or "",
+		mbid = string.match(d or "",
 			"<%s*release%s+[^>]*id%s*=%s*['\"]%s*([0-9a-fA-F-]+)%s*['\"]")
 		if not mbid or not valid_mbid(mbid) then
 			print("MusicBrainz returned no match.")
