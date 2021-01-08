@@ -1,7 +1,3 @@
-⚠ Note: This software is currently unmaintained since I don't have the resources or interest right now to maintain it. If you want to work on it, I could give you access to the repository, or just fork it. :-)
-
-----
-
 mpv-notify
 ==========
 
