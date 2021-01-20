@@ -48,16 +48,6 @@ function is_readable(fn)
 end
 
 
--- url-escape a string, per RFC 2396, Section 2
-function string.urlescape(str)
-	local s, c = string.gsub(str, "([^A-Za-z0-9_.!~*'()/-])",
-		function(c)
-			return ("%%%02x"):format(c:byte())
-		end)
-	return s;
-end
-
-
 -- escape string for html
 function string.htmlescape(str)
 	str = string.gsub(str, "<", "&lt;")
@@ -94,16 +84,13 @@ end
 -------------------------------------------------------------------------------
 
 
+local COVER_ART_SIZE = "1200"
 local DOWNLOAD_COVER_ART = true
-
-
-local http = nil
+local mbcoverart = nil
 --local json = nil
 if DOWNLOAD_COVER_ART then
-	http = require("socket.http")
-	http.TIMEOUT = 3
-	http.USERAGENT = "mpv-notify/0.2 (github.com/sylvandb/mpv-notify)"
-	--json = require "json" -- https://github.com/rxi/json.lua
+	mbcoverart = require("mbcoverart")
+	COVER_ART_SIZE = mbcoverart.COVER_ART_SIZE
 end
 
 local posix = require("posix")
@@ -119,27 +106,10 @@ SUBDIRS:gsub(".", function(c)
 end)
 
 
--- size can be 250, 500 or 1200
--- https://wiki.musicbrainz.org/Cover_Art_Archive/API#Cover_Art_Archive_Metadata
-local COVER_ART_SIZE = "1200"
--- scale can be the same or a different size
-local COVER_ART_SCALE = "1200"
+-- scale can be the same as COVER_ART_SIZE or a different size
+local COVER_ART_SCALE = COVER_ART_SIZE
 local NO_FETCH_PREFIX = "404_no-"
 local AUTO_NO_FETCH = true
-
--- musicbrainz api
-local MBID_BASE = "http://musicbrainz.org/ws/2/release"
--- https://musicbrainz.org/doc/MusicBrainz_API
--- could use fmt=json
--- but it doesn't seem to return the same results, e.g. limit and asin, maybe use before limit?
--- to lookup, append the MBID
-local MBID_LOOKUP = MBID_BASE .. "/"
--- to get the MBID, append query
-local MBID_QUERY = MBID_BASE .. "?limit=1&query="
-
--- coverart url, format in the MBID
-local COVER_ART = "http://coverartarchive.org/release/%s/front-" .. COVER_ART_SIZE
-local AMAZON_ART = "http://images.amazon.com/images/P/%s.01._SCLZZZZZZZ_.jpg"
 
 
 function tmpname()
@@ -310,122 +280,23 @@ function find_folder_cover_art(filename)
 end
 
 
--- lookup MBID from MusicBrainz, needed for Cover Art Archive
-function lookup_musicbrainz_id(artist, album, mbid)
-	local valid_mbid = function(s)
-		return s and string.len(s) > 0 and not string.find(s, "[^0-9a-fA-F-]")
-	end
-
-	-- TODO: how to lookup asin given mbin?
-	if mbid and valid_mbid(mbid) then
-		return mbid, lookup_musicbrainz_release_asin(mbid)
-	end
-
-	local asin = nil
-	local query = ('artist:"%s" AND release:"%s"'):format(artist:gsub('"', ""), album:gsub('"', ""))
-	local url = MBID_QUERY .. string.urlescape(query)
-	print("lookup album MBID with: " .. url)
-	local d, c, h = http.request(url)
-	-- poor man's XML parsing:
-	mbid = string.match(d or "",
-		"<%s*release%s+[^>]*id%s*=%s*['\"]%s*([0-9a-fA-F-]+)%s*['\"]")
-	asin = string.match(d or "", "%s*<asin>(%w+)</asin>")
-	if not mbid or not valid_mbid(mbid) then
-		print("MusicBrainz returned no match.")
-		print_debug("content: " .. d)
+function download_cover_art_to_cache(artist, album, mbid)
+	artist = artist or ""
+	album = album or ""
+	mbid = mbid or ""
+	if not ((artist ~= "" and album ~= "") or mbid ~= "") then
 		return nil
 	end
-	if not asin then
-		print("MusicBrainz missing ASIN")
-		print_debug("content: " .. d)
-	end
-	return mbid, asin
-end
 
-
--- lookup ASIN from MusicBrainz given MBID, needed for Amazon cover art
-function lookup_musicbrainz_release_asin(mbid)
-	local url = MBID_LOOKUP .. mbid
-	print("lookup album MBID with: " .. url)
-	local d, c, h = http.request(url)
-	-- poor man's XML parsing:
-	asin = string.match(d or "", "%s*<asin>(%w+)</asin>")
-	if not asin then
-		print("MusicBrainz missing ASIN")
-		print_debug("content: " .. d)
-	end
-	return asin
-end
-
-
--- fetch image from amazon cover art, requires ASIN
-function download_amazon_cover_art(art_id)
-	local url = (AMAZON_ART):format(art_id)
-	print("downloading album cover from: " .. url)
-	local d, c, h = http.request(url)
-	if c ~= 200 then
-		print(("Amazon Art returned HTTP %s for MBID: %s"):format(c, art_id))
-		return nil
-	end
-	if not d or string.len(d) < 1 then
-		print(("Amazon Art returned no content for MBID: %s"):format(art_id))
-		print_debug("HTTP response: " .. d)
-		return nil
-	end
-	return d
-end
-
-
--- fetch image from Cover Art Archive, requires MBID
-function download_archive_cover_art(art_id)
-	local url = (COVER_ART):format(art_id)
-	print("downloading album cover from: " .. url)
-	local d, c, h = http.request(url)
-	if c ~= 200 then
-		print(("Cover Art Archive returned HTTP %s for MBID: %s"):format(c, art_id))
-		return nil
-	end
-	if not d or string.len(d) < 1 then
-		print(("Cover Art Archive returned no content for MBID: %s"):format(art_id))
-		print_debug("HTTP response: " .. d)
-		return nil
-	end
-	return d
-end
-
-
--- fetch cover art from MusicBrainz/Cover Art Archive
--- @return file name of downloaded cover art, or nil in case of error
--- @param mbid optional MusicBrainz release ID
-function download_cover_art(artist, album, mbid)
-	if not DOWNLOAD_COVER_ART then
-		return nil
-	end
 	if no_download_flag(artist, album) then
 		print("not downloading album art")
 		return nil
 	end
-	print_debug("download_cover_art parameters:")
-	print_debug("artist: " .. artist)
-	print_debug("album: " .. album)
-	print_debug("mbid: " .. mbid)
 
-	print_debug("downloading album art")
+	mbid, asin = mbcoverart.lookup_musicbrainz_id(artist, album, mbid)
+	print_debug(("downloading album art: (%s) (%s) (%s) (%s)"):format(artist, album, mbid, asin))
+	d = mbcoverart.download_cover_art(artist, album, mbid, asin)
 
-	local asin = nil
-	local d = nil
-
-	mbid, asin = lookup_musicbrainz_id(artist, album, mbid)
-	if not mbid then
-		no_download_flag_set(artist, album)
-		return nil
-	end
-	print_debug("using MusicBrainz ID / ASIN: " .. mbid .. " / " .. (asin or "nil"))
-
-	d = download_archive_cover_art(mbid)
-	if not d and asin then
-		d = download_amazon_cover_art(asin)
-	end
 	if not d then
 		no_download_flag_set(artist, album, mbid, asin)
 		return nil
@@ -446,9 +317,8 @@ function get_cover_art(artist, album, album_mbid)
 	end
 
 	-- finally check the cover art archive online
-	if not art_file
-	   and ((artist ~= "" and album ~= "") or album_mbid ~= "") then
-		art_file = download_cover_art(artist, album, album_mbid)
+	if not art_file and DOWNLOAD_COVER_ART then
+		art_file = download_cover_art_to_cache(artist, album, album_mbid)
 	end
 
 	return art_file
