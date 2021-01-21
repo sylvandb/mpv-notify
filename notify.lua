@@ -140,17 +140,26 @@ function no_download_flag(artist, album)
 end
 
 
+function no_download_flag_clear(artist, album)
+	if AUTO_NO_FETCH and NO_FETCH_PREFIX then
+		local flagname = cache_compute_filename(artist, album, NO_FETCH_PREFIX)
+		os.remove(flagname)
+	end
+end
+
 function no_download_flag_set(artist, album, mbid, asin)
 	if AUTO_NO_FETCH and NO_FETCH_PREFIX then
 		local flagname = cache_compute_filename(artist, album, NO_FETCH_PREFIX)
 		local f = io.open(flagname, "w+")
-		if mbid then
-			f:write(("mbid=%s\n"):format(mbid))
+		if f then
+			if mbid and mbid ~= "" then
+				f:write(("mbid=%s\n"):format(mbid))
+			end
+			if asin and asin ~= "" then
+				f:write(("asin=%s\n"):format(asin))
+			end
+			f:close()
 		end
-		if asin then
-			f:write(("asin=%s\n"):format(asin))
-		end
-		f:close()
 	end
 end
 
@@ -180,6 +189,7 @@ function cache_set_cover_art(artist, album, artdata, artfile)
 		return artfile
 	end
 
+	no_download_flag_clear(artist, album)
 	local cache_filename = cache_compute_filename(artist, album)
 
 	-- make it a nice size
@@ -214,7 +224,7 @@ function cache_get_cover_art(artist, album)
 	print_debug("album: " .. album)
 
 	if not artist or artist == "" or not album or album == "" then
-		print("cache requires artist and album for cover art.")
+		print_debug("cache requires artist and album for cover art.")
 		return nil
 	end
 
@@ -235,13 +245,30 @@ function folder_get_cover_art(artist, album)
 	-- first try finding local cover art
 	local pathname = mp.get_property_native("path")
 	-- pathname = os.getenv("PWD") .. "/" .. pathname
-	print_debug("path: " .. pathname)
+	print_debug("folder get cover art for path: " .. pathname)
 	pathname = find_folder_cover_art(pathname)
-	if pathname and pathname ~= "" then
+	if pathname and pathname ~= "" and is_readable(pathname) then
 		print_debug("folder found cover art: " .. pathname)
 		return cache_set_cover_art(artist, album, nil, pathname)
 	end
 	return nil
+end
+
+
+function ls_folder_files(folder, ending)
+	local fnames, i = {}, 0
+	local nameending = ""
+	if ending then
+		nameending = ' -iname "*.' .. ending .. '"'
+	end
+	local p = io.popen('find "' .. folder .. '" -maxdepth 1' .. nameending)
+	-- -print0')
+	for fname in p:lines() do
+		i = i + 1
+		fnames[i] = fname
+	end
+	p:close()
+	return fnames
 end
 
 
@@ -252,26 +279,21 @@ function find_folder_cover_art(filename)
 		return nil
 	end
 
-	print_debug("find_folder_cover_art: filename is " .. filename)
+	local path = string.match(filename, "^(.*/)[^/]+$")
+	if not path or path == "" then
+		path = "./"
+	end
+	print_debug("find_folder_cover_art: path: " .. path)
 
 	local cover_extensions = { "png", "jpg", "jpeg", "gif" }
-	local cover_names = { "cover", "front", "AlbumArtwork", "folder", "back", "insert" }
+	local cover_name_parts = { "cover", "front", "art", "folder", "back", "insert" }
 
-	local path = string.match(filename, "^(.*/)[^/]+$")
-
-	for _,name in pairs(cover_names) do
-		for _,ext in pairs(cover_extensions) do
-			morenames = { name, string.upper(name),
-				string.upper(string.sub(name, 1, 1)) .. string.sub(name, 2, -1) }
-			moreexts = { ext, string.upper(ext) }
-			for _,name in pairs(morenames) do
-				for _,ext in pairs(moreexts) do
-					local fn = path .. name .. "." .. ext
-					--print_debug("find_folder_cover_art: trying " .. fn)
-					if is_readable(fn) then
-						print_debug("find_folder_cover_art: match at " .. fn)
-						return fn
-					end
+	for _, ext in ipairs(cover_extensions) do
+		for _, fname in ipairs(ls_folder_files(path, ext)) do
+			for _, part in ipairs(cover_name_parts) do
+				if fname:lower():find(part) then
+					print(("find_folder_cover_art: match part '%s' in: %s"):format(part, fname))
+					return fname
 				end
 			end
 		end
@@ -288,7 +310,7 @@ function download_cover_art_to_cache(artist, album, mbid)
 		return nil
 	end
 
-	if no_download_flag(artist, album) then
+	if not mbcoverart or no_download_flag(artist, album) then
 		print("not downloading album art")
 		return nil
 	end
@@ -336,7 +358,7 @@ function notify_current_track()
 	end
 
 	function get_metadata(data, keys)
-		for _,v in pairs(keys) do
+		for _, v in ipairs(keys) do
 			if data[v] and string.len(data[v]) > 0 then
 				return data[v]
 			end
