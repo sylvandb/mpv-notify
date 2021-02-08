@@ -72,6 +72,15 @@ end
 function string.safe_filename(str)
 	local s, _ = string.gsub(str, "([^A-Za-z0-9_.-])",
 		function(c)
+			return ("+%02x"):format(c:byte())
+		end)
+	return s;
+end
+-- legacy - deprecated version is not reversible
+-- find . -type f | sort | grep '[^0-9+][1-9][0-9][^0-9]'; echo "========"; find . -type f | sort | grep '+'
+function string.safe_filename0(str)
+	local s, _ = string.gsub(str, "([^A-Za-z0-9_.-])",
+		function(c)
 			return ("%02x"):format(c:byte())
 		end)
 	return s;
@@ -165,9 +174,20 @@ end
 
 
 function cache_compute_filename(artist, album, prefix)
-	local filename = artist .. "_" .. album
-	local dirname = string.safe_filename(filename:gsub(" ", ""):gsub("^THE", ""):sub(1, 1):upper())
-	return CACHE_DIR .. "/" .. dirname .. "/" .. (prefix or "") .. string.safe_filename(filename) .. ".png"
+	local filename = string.gsub(artist .. "_" .. album, "[ \r\n.]", "")
+	if filename:sub(1, 3):upper() == "THE" then
+		filename = filename:sub(4)
+	end
+	local dirname = filename:sub(1, 1):upper()
+	local pathname = CACHE_DIR .. "/" .. dirname:safe_filename() .. "/" .. (prefix or "") .. filename:safe_filename() .. ".png"
+	-- legacy - rename old file to new name
+	local name0 = CACHE_DIR .. "/" .. dirname:safe_filename0() .. "/" .. (prefix or "") .. filename:safe_filename0() .. ".png"
+	if name0 ~= pathname then
+		print("cache_rename " .. name0 .. " " .. pathname)
+		os.rename(name0, pathname)
+	end
+	--print("cache: " .. pathname); print("kill it" .. nil)
+	return pathname
 end
 
 
