@@ -35,16 +35,16 @@ function print_debug(s)
 end
 
 
-local err = ""
 -- TODO: dirty hack, may only work on Linux.
-function is_readable(fn)
+function read_error(fn)
 	local f = nil
+	local err = nil
 	f, err = io.open(fn, "r")
 	if f then
 		f:close()
-		return true
+		return nil
 	end
-	return false
+	return err
 end
 
 
@@ -132,7 +132,7 @@ function no_download_flag(artist, album)
 	if NO_FETCH_PREFIX then
 		-- TODO: check flag being too old???
 		local flagname = cache_compute_filename(artist, album, NO_FETCH_PREFIX)
-		if is_readable(flagname) then
+		if not read_error(flagname) then
 			return true
 		end
 	end
@@ -229,7 +229,8 @@ function cache_get_cover_art(artist, album)
 	end
 
 	local cache_filename = cache_compute_filename(artist, album)
-	if is_readable(cache_filename) then
+	local err = read_error(cache_filename)
+	if not err then
 		print_debug("cache found cover art: " .. cache_filename)
 		return cache_filename  -- exists and is readable
 	elseif string.find(err, "[Pp]ermission denied") then
@@ -247,7 +248,7 @@ function folder_get_cover_art(artist, album)
 	-- pathname = os.getenv("PWD") .. "/" .. pathname
 	print_debug("folder get cover art for path: " .. pathname)
 	pathname = find_folder_cover_art(pathname)
-	if pathname and pathname ~= "" and is_readable(pathname) then
+	if pathname and pathname ~= "" and not read_error(pathname) then
 		print_debug("folder found cover art: " .. pathname)
 		return cache_set_cover_art(artist, album, nil, pathname)
 	end
