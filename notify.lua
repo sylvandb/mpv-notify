@@ -99,11 +99,6 @@ local posix = require("posix")
 local CACHE_DIR = os.getenv("XDG_CACHE_HOME")
 CACHE_DIR = CACHE_DIR or os.getenv("HOME").."/.cache"
 CACHE_DIR = CACHE_DIR.."/mpv/coverart"
-print_debug("making " .. CACHE_DIR)
-local SUBDIRS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-SUBDIRS:gsub(".", function(c)
-	os.execute("mkdir -p -- " .. string.shellescape(CACHE_DIR) .. "/" .. c)
-end)
 
 
 -- scale can be the same as COVER_ART_SIZE or a different size
@@ -130,8 +125,11 @@ end
 
 function no_download_flag(artist, album)
 	if NO_FETCH_PREFIX then
+		if not artist or artist == "" or not album or album == "" then
+			return false
+		end
 		-- TODO: check flag being too old???
-		local flagname = cache_compute_filename(artist, album, NO_FETCH_PREFIX)
+		local flagname = cache_compute_pathname(artist, album, NO_FETCH_PREFIX)
 		if not read_error(flagname) then
 			return true
 		end
@@ -142,15 +140,25 @@ end
 
 function no_download_flag_clear(artist, album)
 	if AUTO_NO_FETCH and NO_FETCH_PREFIX then
-		local flagname = cache_compute_filename(artist, album, NO_FETCH_PREFIX)
+		if not artist or artist == "" or not album or album == "" then
+			return
+		end
+		local flagname = cache_compute_pathname(artist, album, NO_FETCH_PREFIX)
 		os.remove(flagname)
 	end
 end
 
 function no_download_flag_set(artist, album, mbid, asin)
 	if AUTO_NO_FETCH and NO_FETCH_PREFIX then
-		local flagname = cache_compute_filename(artist, album, NO_FETCH_PREFIX)
+		if not artist or artist == "" or not album or album == "" then
+			return
+		end
+		local flagname = cache_compute_pathname(artist, album, NO_FETCH_PREFIX)
 		local f = io.open(flagname, "w+")
+		if not f then
+			cache_mkdir(artist, album)
+			f = io.open(flagname, "w+")
+		end
 		if f then
 			if mbid and mbid ~= "" then
 				f:write(("mbid=%s\n"):format(mbid))
@@ -164,15 +172,36 @@ function no_download_flag_set(artist, album, mbid, asin)
 end
 
 
-function cache_compute_filename(artist, album, prefix)
-	local filename = string.gsub(artist .. "_" .. album, "[ \r\n.]", "")
-	if filename:sub(1, 3):upper() == "THE" then
-		filename = filename:sub(4)
+-- process artist and album for cache filename
+function cache_compute_filename(artist, album)
+	artist = artist:gsub("^[^a-zA-Z0-9]+", "")
+	album  =  album:gsub("^[^a-zA-Z0-9]+", "")
+	if artist:sub(1, 3):upper() == "THE" then
+		artist = artist:sub(4)
+		artist = artist:gsub("^[^a-zA-Z0-9]+", "")
 	end
+	if artist == "" or album == "" then
+		return nil
+	end
+	return string.gsub(artist .. "_" .. album, "[ \r\n.]", "")
+end
+
+
+function cache_compute_pathname(artist, album, prefix)
+	local filename = cache_compute_filename(artist, album)
 	local dirname = filename:sub(1, 1):upper()
 	local pathname = CACHE_DIR .. "/" .. dirname:safe_filename() .. "/" .. (prefix or "") .. filename:safe_filename() .. ".png"
 	--print("cache: " .. pathname); print("kill it" .. nil)
 	return pathname
+end
+
+
+-- create the correct dir to store a cache file
+function cache_mkdir(artist, album)
+	local filename = cache_compute_filename(artist, album)
+	local dirname = string.safe_filename(filename:sub(1, 1):upper())
+	print(("Making cache dir '%s' for: %s"):format(dirname, filename))
+	os.execute("mkdir -p -- " .. string.shellescape(CACHE_DIR) .. "/" .. dirname)
 end
 
 
@@ -195,11 +224,20 @@ function cache_set_cover_art(artist, album, artdata, artfile)
 	end
 
 	no_download_flag_clear(artist, album)
-	local cache_filename = cache_compute_filename(artist, album)
+	local cache_filename = cache_compute_pathname(artist, album)
+	local did_mkdir = false
 
 	-- make it a nice size
 	if COVER_ART_SIZE ~= COVER_ART_SCALE or not file_is_tmp then
-		if scale_image(artfile, cache_filename) then
+		local scaled = true
+		if not scale_image(artfile, cache_filename) then
+			cache_mkdir(artist, album)
+			did_mkdir = true
+			if not scale_image(artfile, cache_filename) then
+				scaled = false
+			end
+		end
+		if scaled then
 			if file_is_tmp then
 				if not os.remove(artfile) then
 					print("could not remove" .. artfile .. ", please remove it manually")
@@ -213,6 +251,12 @@ function cache_set_cover_art(artist, album, artdata, artfile)
 	if file_is_tmp then
 		if os.rename(artfile, cache_filename) then
 			return cache_filename
+		end
+		if not did_mkdir then
+			cache_mkdir(artist, album)
+			if os.rename(artfile, cache_filename) then
+				return cache_filename
+			end
 		end
 		print(("could not rename %s to %s"):format(artfile, cache_filename))
 	end
@@ -233,7 +277,7 @@ function cache_get_cover_art(artist, album)
 		return nil
 	end
 
-	local cache_filename = cache_compute_filename(artist, album)
+	local cache_filename = cache_compute_pathname(artist, album)
 	local err = read_error(cache_filename)
 	if not err then
 		print_debug("cache found cover art: " .. cache_filename)
