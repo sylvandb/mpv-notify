@@ -50,7 +50,7 @@ end
 
 -- escape string for html
 function string.htmlescape(str)
-	str = string.gsub(str, "<", "&lt;")
+	local str = string.gsub(str, "<", "&lt;")
 	str = string.gsub(str, ">", "&gt;")
 	str = string.gsub(str, "&", "&amp;")
 	str = string.gsub(str, "\"", "&quot;")
@@ -61,7 +61,7 @@ end
 
 -- escape string for shell inclusion
 function string.shellescape(str)
-	str = string.gsub(str, "[\r\n]", " ")
+	local str = string.gsub(str, "[\r\n]", " ")
 	str = string.gsub(str, " +$", "")
 	str = string.gsub(str, "^ +", "")
 	return "'"..string.gsub(str, "'", "'\"'\"'").."'"
