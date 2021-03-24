@@ -421,7 +421,10 @@ end
 
 
 -- notify when media file is loaded
-mp.register_event("file-loaded", notify_current_track)
+--mp.register_event("file-loaded", notify_current_track)
+-- delay before notify
+local _notify_timer = mp.add_timeout(1, function() return; end)
+mp.register_event("file-loaded", function() _notify_timer:kill(); _notify_timer = mp.add_timeout(10, notify_current_track); end)
 
 -- notify when metadata is loaded - will double notify every new file
 --mp.observe_property("metadata", nil, function(name, value) notify_current_track(); end)
