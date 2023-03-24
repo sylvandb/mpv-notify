@@ -1,4 +1,6 @@
-#!/usr/bin/lua5.2
+#!/usr/bin/env lua5.2
+-- the shebang is causing an error now, why?!?
+-- mpv is loading this file, and now lua5.2 is angry?
 
 if not arg then
 	return
@@ -46,6 +48,7 @@ end
 local http = require("socket.http")
 http.TIMEOUT = 3
 
+package.preload.mbcoverart=loadfile('./mbcoverart.lua')
 local mbca = require("mbcoverart")
 mbca.print_debug = print_debug
 

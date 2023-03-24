@@ -87,8 +87,8 @@ end
 local COVER_ART_SIZE = "1200"
 local DOWNLOAD_COVER_ART = true
 local mbcoverart = nil
---local json = nil
 if DOWNLOAD_COVER_ART then
+	package.preload.mbcoverart=loadfile('./mbcoverart.lua')
 	mbcoverart = require("mbcoverart")
 	COVER_ART_SIZE = mbcoverart.COVER_ART_SIZE
 end
